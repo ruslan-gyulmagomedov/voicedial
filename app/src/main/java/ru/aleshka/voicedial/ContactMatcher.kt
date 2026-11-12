@@ -8,7 +8,9 @@ data class ContactEntry(
     val contactId: Long,
     val name: String,
     val number: String,
-    val type: Int
+    val type: Int,
+    /** Строка записной книжки с действием «позвонить в Telegram»; 0 — нет. */
+    val telegramCallData: Long = 0L
 )
 
 data class ContactMatch(
@@ -172,6 +174,43 @@ object ContactMatcher {
             if (d != null) sb.append(d) else if (w.all { it.isDigit() }) sb.append(w)
         }
         return if (sb.length >= 3) sb.toString() else null
+    }
+
+    /** Куда звонить: обычный телефонный звонок или Telegram. */
+    enum class Target { PHONE, TELEGRAM }
+
+    private fun words(raw: String): List<String> =
+        raw.lowercase().split(Regex("[^а-яёa-z0-9]+")).filter { it.isNotEmpty() }
+
+    private fun isTelegramWord(word: String): Boolean {
+        val w = normalize(word)
+        if (w == "тг" || w == "tg" || w == "telega" || w == "telegram") return true
+        if (w.startsWith("телеграф")) return false
+        // «телеграм», «телеграмме», «телега», «телеге», «телегу», «телегой»
+        return w.startsWith("телеграм") || w.startsWith("телег") || w.startsWith("telegram")
+    }
+
+    /** Возвращает TELEGRAM, если во фразе назван мессенджер; иначе null. */
+    fun detectTarget(raw: String): Target? =
+        if (words(raw).any { isTelegramWord(it) }) Target.TELEGRAM else null
+
+    private val messengerPrepositions = setOf("в", "во", "по", "через", "на")
+
+    /** Убирает из фразы «в телеграм», «в телеге», «по тг» и т.п. */
+    fun stripTarget(raw: String): String {
+        val parts = raw.split(Regex("\\s+")).filter { it.isNotEmpty() }
+        val drop = HashSet<Int>()
+        for ((i, w) in parts.withIndex()) {
+            if (isTelegramWord(w)) {
+                drop.add(i)
+                if (i > 0) {
+                    val prev = words(parts[i - 1]).firstOrNull()
+                    if (prev != null && messengerPrepositions.contains(prev)) drop.add(i - 1)
+                }
+            }
+        }
+        if (drop.isEmpty()) return raw
+        return parts.filterIndexed { i, _ -> !drop.contains(i) }.joinToString(" ")
     }
 
     private val commandPrefixes = listOf(

@@ -30,6 +30,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private var onDevice = false
 
     private var state = State.NAME
+    private var target = ContactMatcher.Target.PHONE
     private var candidates: List<ContactMatch> = emptyList()
     private var attempts = 0
     private var busy = false
@@ -251,8 +252,11 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             finish()
             return
         }
+        ContactMatcher.detectTarget(phrase)?.let { target = it }
+        val cleaned = ContactMatcher.stripTarget(phrase)
+
         if (state == State.CHOICE && candidates.size > 1) {
-            val choice = ContactMatcher.extractChoice(phrase)
+            val choice = ContactMatcher.extractChoice(cleaned)
             if (choice != null && choice in 1..candidates.size) {
                 dial(candidates[choice - 1].entry)
                 return
@@ -262,21 +266,51 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             state = State.NAME
         }
 
-        val number = ContactMatcher.extractNumber(phrase)
-        val name = ContactMatcher.extractName(phrase)
+        val number = ContactMatcher.extractNumber(cleaned)
+        val name = ContactMatcher.extractName(cleaned)
 
         if (number != null && name.count { it.isLetter() } < 2) {
-            speak("Звоню по номеру.") { placeCall(number, "номер") }
+            if (target == ContactMatcher.Target.TELEGRAM) {
+                speak("Звоню по номеру в Телеграме.") {
+                    placeTelegramCall(ContactEntry(0L, "номер", number, 0))
+                }
+            } else {
+                speak("Звоню по номеру.") { placeCall(number, "номер") }
+            }
             return
         }
 
-        val query = name.ifEmpty { phrase }
+        val query = name.ifEmpty { cleaned }
+
+        if (target == ContactMatcher.Target.TELEGRAM) {
+            if (!TelegramDialer.isInstalled(this)) {
+                speak("Telegram не установлен на этом телефоне.")
+                return
+            }
+            var matches = ContactMatcher.find(
+                ContactMatcher.bestPerContact(TelegramDialer.loadCallableContacts(this)),
+                query
+            ).take(5)
+            if (matches.isEmpty()) {
+                // Telegram не синхронизировал записную книжку — пробуем через номер
+                matches = ContactMatcher.find(
+                    ContactMatcher.bestPerContact(ContactMatcher.loadContacts(this)),
+                    query
+                ).take(5)
+            }
+            handleMatches(matches)
+            return
+        }
+
         val contacts = ContactMatcher.bestPerContact(ContactMatcher.loadContacts(this))
         if (contacts.isEmpty()) {
             speak("В записной книжке нет контактов с номерами.")
             return
         }
-        val matches = ContactMatcher.find(contacts, query).take(5)
+        handleMatches(ContactMatcher.find(contacts, query).take(5))
+    }
+
+    private fun handleMatches(matches: List<ContactMatch>) {
         when {
             matches.isEmpty() -> retry("Не нашёл такого контакта.")
             matches.size == 1 -> dial(matches.first().entry)
@@ -295,8 +329,27 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     }
 
     private fun dial(entry: ContactEntry) {
-        speak("Звоню ${entry.name}.") {
-            placeCall(entry.number, entry.name)
+        if (target == ContactMatcher.Target.TELEGRAM) {
+            speak("Звоню ${entry.name} в Телеграме.") {
+                placeTelegramCall(entry)
+            }
+        } else {
+            speak("Звоню ${entry.name}.") {
+                placeCall(entry.number, entry.name)
+            }
+        }
+    }
+
+    private fun placeTelegramCall(entry: ContactEntry) {
+        val intent = TelegramDialer.callIntent(this, entry)
+        if (intent == null) {
+            speak("Не удалось позвонить в Телеграме. Проверьте, что контакт есть в Telegram.")
+            return
+        }
+        try {
+            startActivity(intent)
+        } catch (e: Exception) {
+            speak("Не удалось открыть Telegram.")
         }
     }
 
