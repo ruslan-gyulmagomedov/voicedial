@@ -6,43 +6,85 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.provider.ContactsContract
 
-/**
- * Звонки в Telegram.
- *
- * Telegram для Android не даёт отдельного API звонков, но кладёт в записную
- * книжку на каждого синхронизированного пользователя строку с действием
- * «позвонить». Открытие этой строки системным интентом сразу начинает звонок.
- * Запасной путь — схема `tg://call?phone=<номер>`, которую понимает Telegram
- * для Android; по ней звонок пойдёт, если номер есть в контактах Telegram.
- */
 object TelegramDialer {
 
-    const val MIME_CALL = "vnd.android.cursor.item/vnd.org.telegram.messenger.android.call"
-    const val MIME_VIDEO = "vnd.android.cursor.item/vnd.org.telegram.messenger.android.call.video"
+    /** Официальный клиент Telegram. */
+    const val OFFICIAL = "org.telegram.messenger"
 
-    private val packages = listOf(
-        "org.telegram.messenger",
-        "org.telegram.messenger.web",
+    /** Клиенты, чьи звонки мы умеем запускать. Порядок — предпочтение среди сторонних. */
+    private val knownPackages = listOf(
+        "app.nicegram",
+        "org.nicegram.messenger.app",
         "org.telegram.messenger.beta",
-        "org.thunderdog.challegram"
+        "org.telegram.messenger.web",
+        "org.thunderdog.challegram",
+        OFFICIAL
     )
 
-    fun installedPackage(context: Context): String? =
-        packages.firstOrNull {
-            try {
-                context.packageManager.getPackageInfo(it, 0)
-                true
-            } catch (e: PackageManager.NameNotFoundException) {
-                false
-            }
+    private const val MIME_PREFIX = "vnd.android.cursor.item/vnd."
+    private const val MIME_SUFFIX = ".android.call"
+    private const val MIME_VIDEO_SUFFIX = ".android.call.video"
+
+    private fun installed(context: Context, pkg: String): Boolean = try {
+        context.packageManager.getPackageInfo(pkg, 0)
+        true
+    } catch (e: PackageManager.NameNotFoundException) {
+        false
+    }
+
+    /** Все установленные клиенты Telegram, включая форки (Nicegram и др.). */
+    fun installedClients(context: Context): List<String> = knownPackages.filter { installed(context, it) }
+
+    fun isInstalled(context: Context): Boolean = installedClients(context).isNotEmpty()
+
+    /**
+     * Клиент, через который звоним: выбор пользователя для ссылок tg://, затем
+     * сторонний клиент (Nicegram и подобные), и только потом официальный.
+     */
+    fun preferredPackage(context: Context): String? {
+        val available = installedClients(context)
+        if (available.isEmpty()) return null
+
+        val probe = Intent(Intent.ACTION_VIEW, Uri.parse("tg://resolve")).apply {
+            addCategory(Intent.CATEGORY_BROWSABLE)
         }
+        val resolved = try {
+            context.packageManager.resolveActivity(probe, 0)?.activityInfo?.packageName
+        } catch (e: Exception) {
+            null
+        }
+        if (resolved != null && available.contains(resolved)) return resolved
 
-    fun isInstalled(context: Context): Boolean = installedPackage(context) != null
+        return available.firstOrNull { it != OFFICIAL } ?: available.first()
+    }
 
-    /** Контакты, для которых Telegram добавил действие «позвонить». */
+    /** Как клиент называется для голоса: «Telegram», «Nicegram». */
+    fun clientLabel(context: Context): String {
+        val pkg = preferredPackage(context) ?: return "Telegram"
+        val appInfo = try {
+            context.packageManager.getApplicationInfo(pkg, 0)
+        } catch (e: PackageManager.NameNotFoundException) {
+            null
+        }
+        val label = appInfo?.let { context.packageManager.getApplicationLabel(it).toString() }
+        return if (label.isNullOrBlank()) "Telegram" else label
+    }
+
+    private fun packageOfMime(mime: String): String {
+        var s = mime
+        if (s.startsWith(MIME_PREFIX)) s = s.removePrefix(MIME_PREFIX)
+        if (s.endsWith(MIME_VIDEO_SUFFIX)) s = s.removeSuffix(MIME_VIDEO_SUFFIX)
+        if (s.endsWith(MIME_SUFFIX)) s = s.removeSuffix(MIME_SUFFIX)
+        return s
+    }
+
+    private data class CallRow(val dataId: Long, val mime: String, val pkg: String)
+
+    /** Контакты, для которых клиент Telegram добавил действие «позвонить». */
     fun loadCallableContacts(context: Context): List<ContactEntry> {
-        // contactId -> id строки Data с действием звонка (обычный звонок в приоритете)
-        val dataByContact = LinkedHashMap<Long, Long>()
+        val preferred = preferredPackage(context)
+        val rowsByContact = LinkedHashMap<Long, MutableList<CallRow>>()
+
         context.contentResolver.query(
             ContactsContract.Data.CONTENT_URI,
             arrayOf(
@@ -50,30 +92,30 @@ object TelegramDialer {
                 ContactsContract.Data.CONTACT_ID,
                 ContactsContract.Data.MIMETYPE
             ),
-            "${ContactsContract.Data.MIMETYPE} IN (?, ?)",
-            arrayOf(MIME_CALL, MIME_VIDEO),
+            "${ContactsContract.Data.MIMETYPE} LIKE ?",
+            arrayOf("%$MIME_SUFFIX%"),
             null
         )?.use { cursor ->
             val idIdx = cursor.getColumnIndexOrThrow(ContactsContract.Data._ID)
             val contactIdx = cursor.getColumnIndexOrThrow(ContactsContract.Data.CONTACT_ID)
             val mimeIdx = cursor.getColumnIndexOrThrow(ContactsContract.Data.MIMETYPE)
             while (cursor.moveToNext()) {
-                val contactId = cursor.getLong(contactIdx)
-                val dataId = cursor.getLong(idIdx)
-                val mime = cursor.getString(mimeIdx)
-                if (mime == MIME_CALL || !dataByContact.containsKey(contactId)) {
-                    dataByContact[contactId] = dataId
-                }
+                val mime = cursor.getString(mimeIdx) ?: continue
+                val pkg = packageOfMime(mime)
+                if (!installed(context, pkg)) continue
+                val row = CallRow(cursor.getLong(idIdx), mime, pkg)
+                rowsByContact.getOrPut(cursor.getLong(contactIdx)) { ArrayList() }.add(row)
             }
         }
-        if (dataByContact.isEmpty()) return emptyList()
+        if (rowsByContact.isEmpty()) return emptyList()
 
         val phones = ContactMatcher.bestPerContact(ContactMatcher.loadContacts(context))
             .associateBy { it.contactId }
-        val missing = dataByContact.keys.filter { !phones.containsKey(it) }
+        val missing = rowsByContact.keys.filter { !phones.containsKey(it) }
         val extraNames = if (missing.isEmpty()) emptyMap() else loadNames(context, missing)
 
-        return dataByContact.mapNotNull { (contactId, dataId) ->
+        return rowsByContact.mapNotNull { (contactId, rows) ->
+            val row = rows.firstOrNull { it.pkg == preferred } ?: rows.first()
             val phone = phones[contactId]
             val name = phone?.name ?: extraNames[contactId] ?: return@mapNotNull null
             ContactEntry(
@@ -81,19 +123,21 @@ object TelegramDialer {
                 name = name,
                 number = phone?.number.orEmpty(),
                 type = phone?.type ?: 0,
-                telegramCallData = dataId
+                telegramCallData = row.dataId,
+                telegramMime = row.mime,
+                telegramPackage = row.pkg
             )
         }
     }
 
     private fun loadNames(context: Context, ids: List<Long>): Map<Long, String> {
         val result = HashMap<Long, String>()
-        val selection = "${ContactsContract.Contacts._ID} IN (${ids.joinToString(",")})"
+        val placeholders = ids.joinToString(",") { "?" }
         context.contentResolver.query(
             ContactsContract.Contacts.CONTENT_URI,
             arrayOf(ContactsContract.Contacts._ID, ContactsContract.Contacts.DISPLAY_NAME),
-            selection,
-            null,
+            "${ContactsContract.Contacts._ID} IN ($placeholders)",
+            ids.map { it.toString() }.toTypedArray(),
             null
         )?.use { cursor ->
             val idIdx = cursor.getColumnIndexOrThrow(ContactsContract.Contacts._ID)
@@ -106,24 +150,29 @@ object TelegramDialer {
         return result
     }
 
-    /**
-     * Интент, который начинает звонок. Сначала — действие из записной книжки,
-     * затем `tg://call?phone=`. null — Telegram не установлен или нечем звонить.
-     */
     fun callIntent(context: Context, entry: ContactEntry): Intent? {
-        if (entry.telegramCallData > 0L) {
-            val intent = Intent(Intent.ACTION_VIEW).apply {
+        val preferred = preferredPackage(context)
+
+        if (entry.telegramCallData > 0L && entry.telegramMime.isNotEmpty()) {
+            val base = Intent(Intent.ACTION_VIEW).apply {
                 setDataAndType(
                     Uri.parse("content://com.android.contacts/data/${entry.telegramCallData}"),
-                    MIME_CALL
+                    entry.telegramMime
                 )
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
-            if (context.packageManager.resolveActivity(intent, 0) != null) return intent
+            // Сначала пробуем выбранный клиент: у Nicegram та же схема действия,
+            // но строка записной книжки могла достаться официальному Telegram.
+            if (preferred != null) {
+                val toPreferred = Intent(base).setPackage(preferred)
+                if (context.packageManager.resolveActivity(toPreferred, 0) != null) return toPreferred
+            }
+            if (context.packageManager.resolveActivity(base, 0) != null) return base
         }
+
         val digits = entry.number.filter { it.isDigit() }
         if (digits.isEmpty()) return null
-        val pkg = installedPackage(context) ?: return null
+        val pkg = preferred ?: return null
         return Intent(Intent.ACTION_VIEW, Uri.parse("tg://call?phone=$digits")).apply {
             setPackage(pkg)
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)

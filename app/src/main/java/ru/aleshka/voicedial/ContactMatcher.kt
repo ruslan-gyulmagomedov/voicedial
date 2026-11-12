@@ -10,7 +10,11 @@ data class ContactEntry(
     val number: String,
     val type: Int,
     /** Строка записной книжки с действием «позвонить в Telegram»; 0 — нет. */
-    val telegramCallData: Long = 0L
+    val telegramCallData: Long = 0L,
+    /** MIME-тип этой строки: по нему видно, какой клиент её создал. */
+    val telegramMime: String = "",
+    /** Пакет клиента, добавившего строку (официальный Telegram или форк). */
+    val telegramPackage: String = ""
 )
 
 data class ContactMatch(

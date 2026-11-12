@@ -4,6 +4,8 @@ import android.Manifest
 import android.app.Activity
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.media.AudioManager
+import android.media.ToneGenerator
 import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
@@ -64,9 +66,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             textSize = 24f
             contentDescription = "Начать слушать имя контакта"
             setOnClickListener {
-                if (!busy) {
-                    speak("Говорите имя.") { startListening() }
-                }
+                if (!busy) cueThenListen()
             }
             minimumHeight = 160
         }
@@ -158,7 +158,32 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
 
     private fun startFlow() {
         if (recognizer == null) createRecognizer()
-        speak("Кому позвонить?") { startListening() }
+        cueThenListen()
+    }
+
+    /** Короткий сигнал вместо голосовой подсказки: слышно, что можно говорить. */
+    private fun cueThenListen() {
+        playCue()
+        main.postDelayed({ startListening() }, 300)
+    }
+
+    private var tone: ToneGenerator? = null
+
+    private fun playCue() {
+        try {
+            tone?.release()
+            val t = ToneGenerator(AudioManager.STREAM_MUSIC, 70)
+            tone = t
+            t.startTone(ToneGenerator.TONE_PROP_ACK, 120)
+            main.postDelayed({
+                if (tone === t) {
+                    t.release()
+                    tone = null
+                }
+            }, 500)
+        } catch (e: Exception) {
+            // без сигнала слушаем сразу
+        }
     }
 
     private fun createRecognizer() {
@@ -271,7 +296,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
 
         if (number != null && name.count { it.isLetter() } < 2) {
             if (target == ContactMatcher.Target.TELEGRAM) {
-                speak("Звоню по номеру в Телеграме.") {
+                speak("Звоню по номеру в ${TelegramDialer.clientLabel(this)}.") {
                     placeTelegramCall(ContactEntry(0L, "номер", number, 0))
                 }
             } else {
@@ -330,7 +355,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
 
     private fun dial(entry: ContactEntry) {
         if (target == ContactMatcher.Target.TELEGRAM) {
-            speak("Звоню ${entry.name} в Телеграме.") {
+            speak("Звоню ${entry.name} в ${TelegramDialer.clientLabel(this)}.") {
                 placeTelegramCall(entry)
             }
         } else {
@@ -365,6 +390,8 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     }
 
     override fun onDestroy() {
+        tone?.release()
+        tone = null
         recognizer?.destroy()
         recognizer = null
         tts.stop()

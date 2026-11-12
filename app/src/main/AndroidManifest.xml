@@ -15,9 +15,15 @@
         </intent>
         <intent>
             <action android:name="android.intent.action.VIEW" />
+            <data android:mimeType="vnd.android.cursor.item/vnd.app.nicegram.android.call" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
             <data android:scheme="tg" />
         </intent>
         <package android:name="org.telegram.messenger" />
+        <package android:name="app.nicegram" />
+        <package android:name="org.nicegram.messenger.app" />
         <package android:name="org.telegram.messenger.web" />
         <package android:name="org.telegram.messenger.beta" />
         <package android:name="org.thunderdog.challegram" />
