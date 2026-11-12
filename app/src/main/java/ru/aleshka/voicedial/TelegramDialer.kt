@@ -11,8 +11,14 @@ object TelegramDialer {
     /** Официальный клиент Telegram. */
     const val OFFICIAL = "org.telegram.messenger"
 
-    /** Клиенты, чьи звонки мы умеем запускать. Порядок — предпочтение среди сторонних. */
+    /**
+     * Известные клиенты, включая форки. Список нужен только как подстраховка:
+     * основной способ найти клиент — спросить систему, кто открывает ссылки
+     * tg://, так что любой незнакомый форк (Nikogram, Nekogram и т.п.)
+     * находится сам.
+     */
     private val knownPackages = listOf(
+        "tw.nekomimi.nekogram",
         "app.nicegram",
         "org.nicegram.messenger.app",
         "org.telegram.messenger.beta",
@@ -32,33 +38,81 @@ object TelegramDialer {
         false
     }
 
-    /** Все установленные клиенты Telegram, включая форки (Nicegram и др.). */
-    fun installedClients(context: Context): List<String> = knownPackages.filter { installed(context, it) }
+    private fun tgProbe(): Intent = Intent(Intent.ACTION_VIEW, Uri.parse("tg://resolve"))
+
+    /** Пакеты всех приложений, которые умеют открывать ссылки tg://. */
+    private fun linkHandlers(context: Context): List<String> {
+        val result = ArrayList<String>()
+        try {
+            for (info in context.packageManager.queryIntentActivities(tgProbe(), 0)) {
+                val pkg = info.activityInfo.packageName
+                if (!result.contains(pkg)) result.add(pkg)
+            }
+        } catch (e: Exception) {
+            // ничего не нашли — работаем по известным пакетам
+        }
+        return result
+    }
+
+    /** Клиенты, которые оставили в записной книжке строку «позвонить». */
+    private fun contactClients(context: Context): List<String> {
+        val result = ArrayList<String>()
+        try {
+            context.contentResolver.query(
+                ContactsContract.Data.CONTENT_URI,
+                arrayOf(ContactsContract.Data.MIMETYPE),
+                "${ContactsContract.Data.MIMETYPE} LIKE ?",
+                arrayOf("%$MIME_SUFFIX%"),
+                null
+            )?.use { cursor ->
+                while (cursor.moveToNext()) {
+                    val mime = cursor.getString(0) ?: continue
+                    val pkg = packageOfMime(mime)
+                    if (pkg.isNotEmpty() && installed(context, pkg) && !result.contains(pkg)) {
+                        result.add(pkg)
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            // записная книжка недоступна — обойдёмся без этого источника
+        }
+        return result
+    }
+
+    /** Все установленные клиенты Telegram, включая любые форки. */
+    fun installedClients(context: Context): List<String> {
+        val found = LinkedHashSet<String>()
+        found.addAll(linkHandlers(context))
+        for (pkg in knownPackages) {
+            if (installed(context, pkg)) found.add(pkg)
+        }
+        found.addAll(contactClients(context))
+        return found.toList()
+    }
 
     fun isInstalled(context: Context): Boolean = installedClients(context).isNotEmpty()
 
     /**
-     * Клиент, через который звоним: выбор пользователя для ссылок tg://, затем
-     * сторонний клиент (Nicegram и подобные), и только потом официальный.
+     * Клиент, через который звоним. Сначала сторонний клиент (Nikogram, Nekogram,
+     * Nicegram и подобные) — именно его владелец ставил вместо официального;
+     * официальный Telegram — только если других нет.
      */
     fun preferredPackage(context: Context): String? {
         val available = installedClients(context)
         if (available.isEmpty()) return null
 
-        val probe = Intent(Intent.ACTION_VIEW, Uri.parse("tg://resolve")).apply {
-            addCategory(Intent.CATEGORY_BROWSABLE)
-        }
         val resolved = try {
-            context.packageManager.resolveActivity(probe, 0)?.activityInfo?.packageName
+            context.packageManager.resolveActivity(tgProbe(), 0)?.activityInfo?.packageName
         } catch (e: Exception) {
             null
         }
+        if (resolved != null && resolved != OFFICIAL && available.contains(resolved)) return resolved
+        available.firstOrNull { it != OFFICIAL }?.let { return it }
         if (resolved != null && available.contains(resolved)) return resolved
-
-        return available.firstOrNull { it != OFFICIAL } ?: available.first()
+        return available.first()
     }
 
-    /** Как клиент называется для голоса: «Telegram», «Nicegram». */
+    /** Как клиент называется для голоса: «Telegram», «Nikogram». */
     fun clientLabel(context: Context): String {
         val pkg = preferredPackage(context) ?: return "Telegram"
         val appInfo = try {
@@ -115,7 +169,11 @@ object TelegramDialer {
         val extraNames = if (missing.isEmpty()) emptyMap() else loadNames(context, missing)
 
         return rowsByContact.mapNotNull { (contactId, rows) ->
-            val row = rows.firstOrNull { it.pkg == preferred } ?: rows.first()
+            // Строка выбранного клиента, иначе — строка стороннего клиента,
+            // и только потом строка официального Telegram.
+            val row = rows.firstOrNull { it.pkg == preferred }
+                ?: rows.firstOrNull { it.pkg != OFFICIAL }
+                ?: rows.first()
             val phone = phones[contactId]
             val name = phone?.name ?: extraNames[contactId] ?: return@mapNotNull null
             ContactEntry(
@@ -161,11 +219,12 @@ object TelegramDialer {
                 )
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
-            // Сначала пробуем выбранный клиент: у Nicegram та же схема действия,
-            // но строка записной книжки могла достаться официальному Telegram.
-            if (preferred != null) {
-                val toPreferred = Intent(base).setPackage(preferred)
-                if (context.packageManager.resolveActivity(toPreferred, 0) != null) return toPreferred
+            // Сначала выбранный клиент, затем клиент, создавший строку, затем
+            // любой, кто эту строку откроет.
+            for (pkg in listOf(preferred, entry.telegramPackage)) {
+                if (pkg.isNullOrEmpty()) continue
+                val toPkg = Intent(base).setPackage(pkg)
+                if (context.packageManager.resolveActivity(toPkg, 0) != null) return toPkg
             }
             if (context.packageManager.resolveActivity(base, 0) != null) return base
         }
