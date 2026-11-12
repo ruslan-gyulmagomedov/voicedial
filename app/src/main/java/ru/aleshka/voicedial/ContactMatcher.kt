@@ -188,10 +188,25 @@ object ContactMatcher {
 
     private fun isTelegramWord(word: String): Boolean {
         val w = normalize(word)
-        if (w == "тг" || w == "tg" || w == "telega" || w == "telegram") return true
+        if (w.isEmpty()) return false
+        if (w == "тг" || w == "tg" || w == "телегра" || w == "телеграмм" || w == "грам") return true
         if (w.startsWith("телеграф")) return false
+        // «инстаграм» — не мессенджер, звонков не бывает
+        if (w.contains("инстаграм") || w.contains("instagram")) return false
+
+        // Названия клиентов: «Никограм», «Некограм», «Найсграм», «Nicegram».
+        // Пользователь может назвать свой клиент, а не общее слово «телеграм».
+        val clientNames = listOf("никограм", "nikogram", "некограм", "nekogram", "найсграм", "nicegram", "моеграм", "moegram")
+        for (name in clientNames) {
+            if (w == name || w.startsWith(name)) return true
+        }
+
         // «телеграм», «телеграмме», «телега», «телеге», «телегу», «телегой»
-        return w.startsWith("телеграм") || w.startsWith("телег") || w.startsWith("telegram")
+        if (w.startsWith("телеграм") || w.startsWith("телег") || w.startsWith("telegram")) return true
+
+        // Любой другой форк: распознавание часто искажает название, но
+        // окончание «грам» остаётся — «никаграм», «моограм», «gram».
+        return w.endsWith("грам") || w.endsWith("gram")
     }
 
     /** Возвращает TELEGRAM, если во фразе назван мессенджер; иначе null. */
