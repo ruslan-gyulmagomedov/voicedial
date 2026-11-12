@@ -189,24 +189,23 @@ object ContactMatcher {
     private fun isTelegramWord(word: String): Boolean {
         val w = normalize(word)
         if (w.isEmpty()) return false
-        if (w == "тг" || w == "tg" || w == "телегра" || w == "телеграмм" || w == "грам") return true
+        if (w == "тг" || w == "tg" || w == "телегра" || w == "телеграмм") return true
         if (w.startsWith("телеграф")) return false
         // «инстаграм» — не мессенджер, звонков не бывает
         if (w.contains("инстаграм") || w.contains("instagram")) return false
 
-        // Названия клиентов: «Никограм», «Некограм», «Найсграм», «Nicegram».
-        // Пользователь может назвать свой клиент, а не общее слово «телеграм».
-        val clientNames = listOf("никограм", "nikogram", "некограм", "nekogram", "найсграм", "nicegram", "моеграм", "moegram")
-        for (name in clientNames) {
-            if (w == name || w.startsWith(name)) return true
-        }
-
         // «телеграм», «телеграмме», «телега», «телеге», «телегу», «телегой»
         if (w.startsWith("телеграм") || w.startsWith("телег") || w.startsWith("telegram")) return true
 
-        // Любой другой форк: распознавание часто искажает название, но
-        // окончание «грам» остаётся — «никаграм», «моограм», «gram».
-        return w.endsWith("грам") || w.endsWith("gram")
+        // Единицы веса и прочие слова с «грам» — не мессенджеры.
+        for (bad in listOf("килограмм", "миллиграмм", "сантиграмм", "дециграмм", "программ")) {
+            if (w.contains(bad)) return false
+        }
+
+        // Название клиента знать не нужно: у любого клиента Telegram — форка
+        // тоже — в названии есть «грам»/«gram», в любом падеже. Это же спасает,
+        // когда распознавание речи слегка исказило название («никаграм»).
+        return w.contains("грам") || w.contains("gram")
     }
 
     /** Возвращает TELEGRAM, если во фразе назван мессенджер; иначе null. */

@@ -24,7 +24,7 @@ import java.util.Locale
 
 class MainActivity : Activity(), TextToSpeech.OnInitListener {
 
-    private enum class State { NAME, CHOICE }
+    private enum class State { NAME, CHOICE, CLIENT }
 
     private lateinit var tts: TextToSpeech
     private var ttsReady = false
@@ -36,6 +36,8 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private var candidates: List<ContactMatch> = emptyList()
     private var attempts = 0
     private var busy = false
+    /** Фраза, которую отложили, пока владелец выбирает клиент Telegram. */
+    private var pendingPhrase: String? = null
 
     private lateinit var status: TextView
     private lateinit var listenButton: Button
@@ -67,6 +69,11 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             contentDescription = "Начать слушать имя контакта"
             setOnClickListener {
                 if (!busy) cueThenListen()
+            }
+            setOnLongClickListener {
+                TelegramDialer.forgetClient(this@MainActivity)
+                speak("Выбор клиента сброшен. Спрошу заново.")
+                true
             }
             minimumHeight = 160
         }
@@ -202,7 +209,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             speak("Распознавание речи недоступно на этом телефоне.")
             return
         }
-        state = if (candidates.isEmpty()) State.NAME else state
+        if (candidates.isEmpty() && state == State.CHOICE) state = State.NAME
         busy = true
         setStatus("Слушаю…")
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
@@ -277,7 +284,15 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             finish()
             return
         }
+        if (state == State.CLIENT) {
+            handleClientChoice(phrase)
+            return
+        }
         ContactMatcher.detectTarget(phrase)?.let { target = it }
+        if (target == ContactMatcher.Target.TELEGRAM && TelegramDialer.needsChoice(this)) {
+            askClient(phrase)
+            return
+        }
         val cleaned = ContactMatcher.stripTarget(phrase)
 
         if (state == State.CHOICE && candidates.size > 1) {
@@ -333,6 +348,47 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             return
         }
         handleMatches(ContactMatcher.find(contacts, query).take(5))
+    }
+
+    /** Система не назначила обработчик tg:// — спрашиваем, через какой клиент звонить. */
+    private fun askClient(phrase: String) {
+        val clients = TelegramDialer.clientOptions(this)
+        if (clients.isEmpty()) {
+            speak("Telegram не установлен на этом телефоне.")
+            return
+        }
+        pendingPhrase = phrase
+        candidates = emptyList()
+        state = State.CLIENT
+        val listing = clients.mapIndexed { i, pkg ->
+            "${i + 1}. ${TelegramDialer.clientLabel(this, pkg)}"
+        }.joinToString(", ")
+        speak("Установлено несколько клиентов Telegram: $listing. Скажите номер клиента.") {
+            startListening()
+        }
+    }
+
+    private fun handleClientChoice(phrase: String) {
+        val clients = TelegramDialer.clientOptions(this)
+        val choice = ContactMatcher.extractChoice(phrase)
+        if (choice != null && choice in 1..clients.size) {
+            val pkg = clients[choice - 1]
+            TelegramDialer.chooseClient(this, pkg)
+            state = State.NAME
+            val rest = pendingPhrase
+            pendingPhrase = null
+            speak("Хорошо, ${TelegramDialer.clientLabel(this, pkg)}.") {
+                if (rest != null) handlePhrase(rest) else startListening()
+            }
+            return
+        }
+        attempts++
+        if (attempts > 3) {
+            speak("Не понял, через какой клиент звонить.")
+            finish()
+            return
+        }
+        speak("Не понял. Скажите номер клиента.") { startListening() }
     }
 
     private fun handleMatches(matches: List<ContactMatch>) {

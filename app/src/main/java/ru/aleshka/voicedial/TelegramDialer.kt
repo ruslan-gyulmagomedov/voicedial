@@ -15,7 +15,7 @@ object TelegramDialer {
      * Известные клиенты, включая форки. Список нужен только как подстраховка:
      * основной способ найти клиент — спросить систему, кто открывает ссылки
      * tg://, так что любой незнакомый форк (Nikogram, Nekogram и т.п.)
-     * находится сам.
+     * находится сам, без знания его имени.
      */
     private val knownPackages = listOf(
         "tw.nekomimi.nekogram",
@@ -30,6 +30,9 @@ object TelegramDialer {
     private const val MIME_PREFIX = "vnd.android.cursor.item/vnd."
     private const val MIME_SUFFIX = ".android.call"
     private const val MIME_VIDEO_SUFFIX = ".android.call.video"
+
+    private const val PREFS = "voicedial"
+    private const val KEY_CLIENT = "telegram_client"
 
     private fun installed(context: Context, pkg: String): Boolean = try {
         context.packageManager.getPackageInfo(pkg, 0)
@@ -93,28 +96,79 @@ object TelegramDialer {
     fun isInstalled(context: Context): Boolean = installedClients(context).isNotEmpty()
 
     /**
-     * Клиент, через который звоним. Сначала сторонний клиент (Nikogram, Nekogram,
-     * Nicegram и подобные) — именно его владелец ставил вместо официального;
-     * официальный Telegram — только если других нет.
+     * Клиент, который система назначила обработчиком ссылок tg:// по умолчанию.
+     * Именно он получает и наши звонки, если выбор не задан.
      */
-    fun preferredPackage(context: Context): String? {
-        val available = installedClients(context)
-        if (available.isEmpty()) return null
+    fun defaultPackage(context: Context): String? = try {
+        context.packageManager.queryIntentActivities(tgProbe(), 0)
+            .firstOrNull { it.isDefault }
+            ?.activityInfo?.packageName
+    } catch (e: Exception) {
+        null
+    }
 
-        val resolved = try {
-            context.packageManager.resolveActivity(tgProbe(), 0)?.activityInfo?.packageName
+    /** Клиент, который владелец выбрал голосом, когда обработчика по умолчанию нет. */
+    fun savedClient(context: Context): String? {
+        val pkg = try {
+            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_CLIENT, null)
         } catch (e: Exception) {
             null
         }
-        if (resolved != null && resolved != OFFICIAL && available.contains(resolved)) return resolved
-        available.firstOrNull { it != OFFICIAL }?.let { return it }
-        if (resolved != null && available.contains(resolved)) return resolved
-        return available.first()
+        if (pkg.isNullOrEmpty() || !installed(context, pkg)) return null
+        return pkg
+    }
+
+    fun chooseClient(context: Context, pkg: String) {
+        try {
+            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .edit().putString(KEY_CLIENT, pkg).apply()
+        } catch (e: Exception) {
+            // не запомнили — спросим в следующий раз
+        }
+    }
+
+    fun forgetClient(context: Context) {
+        try {
+            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .edit().remove(KEY_CLIENT).apply()
+        } catch (e: Exception) {
+            // нечего сбрасывать
+        }
+    }
+
+    /** Варианты для голосового выбора клиента. */
+    fun clientOptions(context: Context): List<String> = installedClients(context)
+
+    /**
+     * Нужно ли спросить клиента голосом. Спрашиваем, только если система не
+     * назначила обработчик ссылок по умолчанию, владелец ещё не выбирал и
+     * установлено больше одного клиента.
+     */
+    fun needsChoice(context: Context): Boolean {
+        val def = defaultPackage(context)
+        if (def != null && def != OFFICIAL) return false
+        if (savedClient(context) != null) return false
+        return installedClients(context).size > 1
+    }
+
+    /**
+     * Клиент, через который звоним: обработчик ссылок по умолчанию, затем
+     * выбор владельца, затем единственный установленный клиент. null —
+     * клиента нет или выбор неоднозначен (тогда MainActivity спрашивает).
+     */
+    fun preferredPackage(context: Context): String? {
+        val def = defaultPackage(context)
+        if (def != null && def != OFFICIAL) return def
+        savedClient(context)?.let { return it }
+        val clients = installedClients(context)
+        if (clients.size == 1) return clients.first()
+        if (clients.size > 1) return null
+        return def
     }
 
     /** Как клиент называется для голоса: «Telegram», «Nikogram». */
-    fun clientLabel(context: Context): String {
-        val pkg = preferredPackage(context) ?: return "Telegram"
+    fun clientLabel(context: Context, pkg: String?): String {
+        if (pkg.isNullOrEmpty()) return "Telegram"
         val appInfo = try {
             context.packageManager.getApplicationInfo(pkg, 0)
         } catch (e: PackageManager.NameNotFoundException) {
@@ -123,6 +177,8 @@ object TelegramDialer {
         val label = appInfo?.let { context.packageManager.getApplicationLabel(it).toString() }
         return if (label.isNullOrBlank()) "Telegram" else label
     }
+
+    fun clientLabel(context: Context): String = clientLabel(context, preferredPackage(context))
 
     private fun packageOfMime(mime: String): String {
         var s = mime
@@ -209,7 +265,7 @@ object TelegramDialer {
     }
 
     fun callIntent(context: Context, entry: ContactEntry): Intent? {
-        val preferred = preferredPackage(context)
+        val preferred = preferredPackage(context) ?: savedClient(context)
 
         if (entry.telegramCallData > 0L && entry.telegramMime.isNotEmpty()) {
             val base = Intent(Intent.ACTION_VIEW).apply {
