@@ -86,15 +86,118 @@ object ContactMatcher {
             .replace('й', 'и')
             .replace(Regex("[^а-яa-z0-9]"), "")
 
-    /** Обрезает падежные окончания, чтобы «Никите» совпало с «Никита». */
-    private fun stems(s: String): List<String> {
-        val out = ArrayList<String>()
-        val maxTrim = minOf(2, max(0, s.length - 3))
-        for (trim in 0..maxTrim) {
-            out.add(if (trim == 0) s else s.dropLast(trim))
+    /**
+     * Падежные окончания русских слов — от длинных к коротким. Отрезаем
+     * самое длинное подходящее: «Никите» → «никит», «Никитой» → «никит»,
+     * «Ивановой» → «иванов», «Сергеевичу» → «сергеевич». После этого
+     * «позвони Никите» и контакт «Никита» дают один и тот же стебель.
+     */
+    private val caseEndings = listOf(
+        "иями", "ями", "ами", "ией", "иям", "иях", "ием",
+        "ого", "его", "ому", "ему", "ыми", "ими",
+        "ая", "яя", "ое", "ее", "ые", "ие", "ой", "ей", "ий", "ый", "ых", "их",
+        "у", "ю", "а", "я", "о", "е", "ы", "и", "ь", "й"
+    ).sortedByDescending { it.length }
+
+    /** Отрезает падежное окончание, оставляя основу слова. */
+    private fun stem(word: String): String {
+        for (e in caseEndings) {
+            if (word.length - e.length >= 2 && word.endsWith(e)) {
+                return word.dropLast(e.length)
+            }
+        }
+        return word
+    }
+
+    /**
+     * Уменьшительные имена: «Саша» — это «Александр», «Маша» — «Мария»,
+     * «Петя» — «Пётр». Ключи и значения — уже основы слов.
+     */
+    private val nicknames = mapOf(
+        "саш" to "александр", "маш" to "мари", "миш" to "михаил", "дим" to "дмитри",
+        "лен" to "елен", "наташ" to "натал", "кат" to "екатерин", "пет" to "петр",
+        "вас" to "васил", "ван" to "иван", "ан" to "анн", "ол" to "ольг",
+        "люб" to "любов", "тан" to "татьян", "сереж" to "серге", "ген" to "геннади",
+        "юр" to "юри", "кол" to "никола", "тол" to "анатол", "вит" to "виктор",
+        "вов" to "владимир", "слав" to "вячеслав", "бор" to "борис", "паш" to "павел",
+        "гриш" to "григори", "зин" to "зинаид", "над" to "надежд", "сон" to "софи",
+        "свет" to "светлан", "гал" to "галин", "рит" to "маргарит", "юл" to "юли",
+        "ром" to "роман", "влад" to "владимир", "стас" to "станислав"
+    )
+
+    private fun canonical(stemWord: String): String = nicknames[stemWord] ?: stemWord
+
+    /**
+     * Возможные основы слова. Творительный падеж после нормализации даёт
+     * «никитои»/«машеи», поэтому кроме обычной основы пробуем отрезать
+     * «ои»/«еи»/«аи»: «Машей» — это «Маша», а не «Маше».
+     */
+    private fun stemsOf(word: String): List<String> {
+        val out = ArrayList<String>(6)
+        fun add(w: String) {
+            if (w.length >= 2 && !out.contains(w)) out.add(w)
+        }
+        add(word)
+        // «й» на конце ведёт себя как «и»: «Сергей» / «Сергею».
+        add(word.replace('й', 'и'))
+        for (base in out.toList()) {
+            add(stem(base))
+            if (base.length > 4) {
+                for (tail in listOf("ои", "еи", "аи", "уи")) {
+                    if (base.endsWith(tail)) {
+                        add(base.dropLast(tail.length))
+                        break
+                    }
+                }
+            }
         }
         return out
     }
+
+    /**
+     * Похожесть двух слов с учётом падежей, уменьшительных форм и опечаток
+     * распознавания: «Никите»/«Никита» — 0.96, «Саше»/«Александр» — 0.9.
+     */
+    private fun tokenSim(a: String, b: String): Double {
+        if (a == b) return 1.0
+        var best = 0.0
+        for (sa in stemsOf(a)) {
+            for (sb in stemsOf(b)) {
+                if (sa == sb) return 0.96
+                if (canonical(sa) == canonical(sb)) return 0.9
+                var r = ratio(sa, sb)
+                // «Оле» и «Олег», «Иван» и «Иванов» отличаются одной буквой
+                // на конце — это разные люди, а не падеж. Такое совпадение
+                // сильно слабее: настоящие уменьшительные разбирает словарь
+                // выше («Рома» → «Роман»).
+                val extra = when {
+                    sb.length > sa.length && sb.startsWith(sa) -> sb.substring(sa.length)
+                    sa.length > sb.length && sa.startsWith(sb) -> sa.substring(sb.length)
+                    else -> ""
+                }
+                if (extra.isNotEmpty() && extra.length <= 2 &&
+                    extra.all { it !in "аеиоуыэюя" }
+                ) {
+                    r -= 0.25
+                }
+                best = max(best, r)
+            }
+        }
+        return best
+    }
+
+    /** Слова, которые ничего не говорят о контакте: «позвони мне, пожалуйста». */
+    private val fillers = setOf(
+        "мне", "пожалуйста", "это", "ну", "сейчас", "срочно", "потом", "уже",
+        "прямо", "просто", "давай"
+    )
+
+    /** Разбивает фразу на слова для сравнения по частям имени. */
+    private fun tokenize(raw: String): List<String> =
+        raw.lowercase()
+            .replace('ё', 'е')
+            .split(Regex("[^а-яa-z0-9]+"))
+            .filter { it.isNotEmpty() }
 
     private fun levenshtein(a: String, b: String): Int {
         if (a == b) return 0
@@ -119,37 +222,57 @@ object ContactMatcher {
         return 1.0 - levenshtein(a, b).toDouble() / len
     }
 
+    /**
+     * Сравнивает фразу с именем контакта по словам, а не по всей строке.
+     * «Позвони Гюльмагомедову» находит «Руслан Гюльмагомедов», «позвони
+     * Руслану Гюльмагомедову» и «позвони Гюльмагомедову Руслану» — один и
+     * тот же контакт, а лишние слова вроде «мне» и «пожалуйста» не мешают.
+     */
     fun score(queryRaw: String, nameRaw: String): Double {
-        val q = normalize(queryRaw)
-        val n = normalize(nameRaw)
-        if (q.isEmpty() || n.isEmpty()) return 0.0
-        if (n == q) return 1.0
-        if (n.startsWith(q) || q.startsWith(n)) return 0.92
-        if (n.contains(q)) return 0.86
-        // отдельные слова: «позвони маше сергеевой» → «маша сергеева»
-        val nWords = nameRaw.lowercase().replace('ё', 'е')
-            .split(Regex("[^а-яa-z0-9]+")).filter { it.isNotEmpty() }.map { normalize(it) }
-        val qWords = queryRaw.lowercase().replace('ё', 'е')
-            .split(Regex("[^а-яa-z0-9]+")).filter { it.isNotEmpty() }.map { normalize(it) }
-        var wordBest = 0.0
-        for (qw in qWords) {
+        val qAll = tokenize(queryRaw)
+        val nWords = tokenize(nameRaw)
+        if (qAll.isEmpty() || nWords.isEmpty()) return 0.0
+        // Служебные слова («позвони», «мне», «в телеграм») на совпадение не
+        // влияют: имя ищется по тому, что осталось.
+        val qWords = qAll.filter {
+            it !in fillers && it !in commandPrefixes && !isTelegramWord(it)
+        }.ifEmpty { qAll }
+
+        // Та же строка целиком — точное совпадение.
+        if (qWords.joinToString("") == nWords.joinToString("")) return 1.0
+
+        // Для каждого слова запроса — лучшая похожесть на любое слово имени.
+        val bests = DoubleArray(qWords.size)
+        for ((i, qw) in qWords.withIndex()) {
+            var best = 0.0
             for (nw in nWords) {
-                for (qs in stems(qw)) {
-                    for (ns in stems(nw)) {
-                        val r = ratio(qs, ns)
-                        if (r > wordBest) wordBest = r
-                    }
-                }
+                val s = tokenSim(qw, nw)
+                if (s > best) best = s
             }
+            bests[i] = best
         }
-        var stemBest = 0.0
-        for (qs in stems(q)) {
-            for (ns in stems(n)) {
-                val r = ratio(qs, ns)
-                if (r > stemBest) stemBest = r
-            }
+
+        // Максимум — чтобы лишнее слово запроса не обнуляло попадание по
+        // фамилии; среднее с весом длины — чтобы частичное совпадение по
+        // одному слову из двух не притворялось полным.
+        var maxv = 0.0
+        var sum = 0.0
+        var weight = 0.0
+        var minv = 1.0
+        for (i in qWords.indices) {
+            val w = qWords[i].length.toDouble()
+            maxv = max(maxv, bests[i])
+            minv = minOf(minv, bests[i])
+            sum += bests[i] * w
+            weight += w
         }
-        return max(wordBest, stemBest * 0.95)
+        val avg = if (weight == 0.0) 0.0 else sum / weight
+        var s = 0.75 * maxv + 0.25 * avg
+
+        // Все слова запроса уверенно нашли своё слово в имени — это «имя и
+        // фамилия», сильнее, чем совпадение по одному слову.
+        if (qWords.size >= 2 && minv >= 0.85) s = max(s, 0.97)
+        return s.coerceIn(0.0, 1.0)
     }
 
     fun find(entries: List<ContactEntry>, query: String, threshold: Double = 0.6): List<ContactMatch> {
