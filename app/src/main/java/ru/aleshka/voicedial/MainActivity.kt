@@ -38,6 +38,8 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private var busy = false
     /** Фраза, которую отложили, пока владелец выбирает клиент Telegram. */
     private var pendingPhrase: String? = null
+    /** Мессенджер, клиента которого выбирает владелец. */
+    private var clientTarget = ContactMatcher.Target.TELEGRAM
 
     private lateinit var status: TextView
     private lateinit var listenButton: Button
@@ -71,7 +73,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                 if (!busy) cueThenListen()
             }
             setOnLongClickListener {
-                TelegramDialer.forgetClient(this@MainActivity)
+                MessengerDialer.forgetClients(this@MainActivity)
                 speak("Выбор клиента сброшен. Спрошу заново.")
                 true
             }
@@ -288,9 +290,15 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             handleClientChoice(phrase)
             return
         }
-        ContactMatcher.detectTarget(phrase)?.let { target = it }
-        if (target == ContactMatcher.Target.TELEGRAM && TelegramDialer.needsChoice(this)) {
-            askClient(phrase)
+        val detected = ContactMatcher.detectTarget(phrase)
+        if (detected != null) {
+            target = detected
+        } else if (state == State.NAME) {
+            // Мессенджер не назван — это обычный звонок, а не продолжение прошлой фразы.
+            target = ContactMatcher.Target.PHONE
+        }
+        if (target != ContactMatcher.Target.PHONE && MessengerDialer.needsChoice(this, target)) {
+            askClient(phrase, target)
             return
         }
         val cleaned = ContactMatcher.stripTarget(phrase)
@@ -310,29 +318,35 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         val name = ContactMatcher.extractName(cleaned)
 
         if (number != null && name.count { it.isLetter() } < 2) {
-            if (target == ContactMatcher.Target.TELEGRAM) {
-                speak("Звоню по номеру в ${TelegramDialer.clientLabel(this)}.") {
-                    placeTelegramCall(ContactEntry(0L, "номер", number, 0))
-                }
-            } else {
-                speak("Звоню по номеру.") { placeCall(number, "номер") }
+            when (target) {
+                ContactMatcher.Target.PHONE ->
+                    speak("Звоню по номеру.") { placeCall(number, "номер") }
+                ContactMatcher.Target.TELEGRAM ->
+                    speak("Звоню по номеру в ${MessengerDialer.clientLabel(this, target)}.") {
+                        placeMessengerCall(ContactEntry(0L, "номер", number, 0), target)
+                    }
+                else ->
+                    // Ни WhatsApp, ни ВК не умеют звонить по номеру: нужен контакт.
+                    speak("По номеру ${MessengerDialer.inPhrase(target)} позвонить нельзя. Скажите имя контакта.")
             }
             return
         }
 
         val query = name.ifEmpty { cleaned }
 
-        if (target == ContactMatcher.Target.TELEGRAM) {
-            if (!TelegramDialer.isInstalled(this)) {
-                speak("Telegram не установлен на этом телефоне.")
+        if (target != ContactMatcher.Target.PHONE) {
+            val messenger = target
+            if (!MessengerDialer.isInstalled(this, messenger)) {
+                speak("${MessengerDialer.displayName(messenger)} не установлен на этом телефоне.")
                 return
             }
             var matches = ContactMatcher.find(
-                ContactMatcher.bestPerContact(TelegramDialer.loadCallableContacts(this)),
+                ContactMatcher.bestPerContact(MessengerDialer.loadCallableContacts(this, messenger)),
                 query
             ).take(5)
             if (matches.isEmpty()) {
-                // Telegram не синхронизировал записную книжку — пробуем через номер
+                // Контактов мессенджера нет или синхронизация выключена — ищем
+                // по записной книжке, чтобы честно сказать, если контакта нет.
                 matches = ContactMatcher.find(
                     ContactMatcher.bestPerContact(ContactMatcher.loadContacts(this)),
                     query
@@ -351,17 +365,18 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     }
 
     /** Система не назначила обработчик tg:// — спрашиваем, через какой клиент звонить. */
-    private fun askClient(phrase: String) {
-        val clients = TelegramDialer.clientOptions(this)
+    private fun askClient(phrase: String, messenger: ContactMatcher.Target) {
+        val clients = MessengerDialer.clientOptions(this, messenger)
         if (clients.isEmpty()) {
-            speak("Telegram не установлен на этом телефоне.")
+            speak("${MessengerDialer.displayName(messenger)} не установлен на этом телефоне.")
             return
         }
         pendingPhrase = phrase
+        clientTarget = messenger
         candidates = emptyList()
         state = State.CLIENT
         val listing = clients.mapIndexed { i, pkg ->
-            "${i + 1}. ${TelegramDialer.clientLabel(this, pkg)}"
+            "${i + 1}. ${MessengerDialer.clientLabel(this, messenger, pkg)}"
         }.joinToString(", ")
         speak(
             "Установлено несколько клиентов Telegram: $listing, а приложение для ссылок не выбрано. " +
@@ -372,15 +387,15 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     }
 
     private fun handleClientChoice(phrase: String) {
-        val clients = TelegramDialer.clientOptions(this)
+        val clients = MessengerDialer.clientOptions(this, clientTarget)
         val choice = ContactMatcher.extractChoice(phrase)
         if (choice != null && choice in 1..clients.size) {
             val pkg = clients[choice - 1]
-            TelegramDialer.chooseClient(this, pkg)
+            MessengerDialer.chooseClient(this, clientTarget, pkg)
             state = State.NAME
             val rest = pendingPhrase
             pendingPhrase = null
-            speak("Хорошо, ${TelegramDialer.clientLabel(this, pkg)}.") {
+            speak("Хорошо, ${MessengerDialer.clientLabel(this, clientTarget, pkg)}.") {
                 if (rest != null) handlePhrase(rest) else startListening()
             }
             return
@@ -413,27 +428,36 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     }
 
     private fun dial(entry: ContactEntry) {
-        if (target == ContactMatcher.Target.TELEGRAM) {
-            speak("Звоню ${entry.name} в ${TelegramDialer.clientLabel(this)}.") {
-                placeTelegramCall(entry)
-            }
-        } else {
+        if (target == ContactMatcher.Target.PHONE) {
             speak("Звоню ${entry.name}.") {
                 placeCall(entry.number, entry.name)
             }
+            return
+        }
+        val messenger = target
+        speak(MessengerDialer.callPhrase(this, messenger, entry.name)) {
+            placeMessengerCall(entry, messenger)
         }
     }
 
-    private fun placeTelegramCall(entry: ContactEntry) {
-        val intent = TelegramDialer.callIntent(this, entry)
+    private fun placeMessengerCall(entry: ContactEntry, messenger: ContactMatcher.Target) {
+        val intent = MessengerDialer.callIntent(this, entry, messenger)
         if (intent == null) {
-            speak("Не удалось позвонить в Телеграме. Проверьте, что контакт есть в Telegram.")
+            val message = when (messenger) {
+                ContactMatcher.Target.TELEGRAM ->
+                    "Не удалось позвонить в Telegram. Проверьте, что контакт есть в Telegram."
+                ContactMatcher.Target.WHATSAPP ->
+                    "Не удалось позвонить в WhatsApp. Проверьте, что контакт есть в WhatsApp."
+                else ->
+                    "Не удалось позвонить во ВКонтакте. Проверьте, что контакт синхронизирован с ВКонтакте."
+            }
+            speak(message)
             return
         }
         try {
             startActivity(intent)
         } catch (e: Exception) {
-            speak("Не удалось открыть Telegram.")
+            speak("Не удалось открыть ${MessengerDialer.displayName(messenger)}.")
         }
     }
 

@@ -9,12 +9,14 @@ data class ContactEntry(
     val name: String,
     val number: String,
     val type: Int,
-    /** Строка записной книжки с действием «позвонить в Telegram»; 0 — нет. */
-    val telegramCallData: Long = 0L,
-    /** MIME-тип этой строки: по нему видно, какой клиент её создал. */
-    val telegramMime: String = "",
-    /** Пакет клиента, добавившего строку (официальный Telegram или форк). */
-    val telegramPackage: String = ""
+    /** Строка записной книжки с действием «позвонить» в мессенджере; 0 — нет. */
+    val callData: Long = 0L,
+    /** MIME-тип этой строки: по нему видно, какой мессенджер её создал. */
+    val callMime: String = "",
+    /** Пакет приложения, добавившего строку. */
+    val callPackage: String = "",
+    /** Числовой id страницы во ВКонтакте, если контакт синхронизирован с ВК. */
+    val vkUserId: String = ""
 )
 
 data class ContactMatch(
@@ -234,8 +236,19 @@ object ContactMatcher {
         if (qAll.isEmpty() || nWords.isEmpty()) return 0.0
         // Служебные слова («позвони», «мне», «в телеграм») на совпадение не
         // влияют: имя ищется по тому, что осталось.
-        val qWords = qAll.filter {
-            it !in fillers && it !in commandPrefixes && !isTelegramWord(it)
+        val qWords = qAll.filterIndexed { i, w ->
+            val prev = qAll.getOrNull(i - 1)
+            val next = qAll.getOrNull(i + 1)
+            val afterNext = qAll.getOrNull(i + 2)
+            // «сап» и «вот» из разбитого «вот сап» — тоже название мессенджера.
+            val messenger = isMessengerWord(w, prev) ||
+                (w in whatsappSplitPrefixes && next != null && isWhatsappWord(next, w))
+            // Предлог перед названием мессенджера («в ватсап», «во вконтакте»).
+            val preposition = w in messengerPrepositions && next != null &&
+                (isMessengerWord(next, w) ||
+                    (next in whatsappSplitPrefixes && afterNext != null &&
+                        isWhatsappWord(afterNext, next)))
+            w !in fillers && w !in commandPrefixes && !messenger && !preposition
         }.ifEmpty { qAll }
 
         // Та же строка целиком — точное совпадение.
@@ -303,8 +316,8 @@ object ContactMatcher {
         return if (sb.length >= 3) sb.toString() else null
     }
 
-    /** Куда звонить: обычный телефонный звонок или Telegram. */
-    enum class Target { PHONE, TELEGRAM }
+    /** Куда звонить: обычный телефонный звонок или мессенджер. */
+    enum class Target { PHONE, TELEGRAM, WHATSAPP, VK }
 
     private fun words(raw: String): List<String> =
         raw.lowercase().split(Regex("[^а-яёa-z0-9]+")).filter { it.isNotEmpty() }
@@ -331,24 +344,76 @@ object ContactMatcher {
         return w.contains("грам") || w.contains("gram")
     }
 
-    /** Возвращает TELEGRAM, если во фразе назван мессенджер; иначе null. */
-    fun detectTarget(raw: String): Target? =
-        if (words(raw).any { isTelegramWord(it) }) Target.TELEGRAM else null
+    /**
+     * WhatsApp: «ватсап», «вотсап», «вацап», «whatsapp» в любом падеже.
+     * Распознавание речи часто пишет слитно или через дефис, поэтому
+     * сравниваем по началу слова.
+     */
+    private fun isWhatsappWord(w: String, prev: String?): Boolean {
+        if (w.isEmpty()) return false
+        for (stem in listOf(
+            "ватсап", "вотсап", "вацап", "васап", "вотсаб", "ватсаб",
+            "whatsapp", "whatsap", "watsapp", "watsap", "vatsap"
+        )) {
+            if (w.startsWith(stem)) return true
+        }
+        // «вот сап», «ват сап» — распознавание разбило слово на два.
+        if ((w == "сап" || w == "ап") && prev != null &&
+            (prev == "вот" || prev == "ват" || prev == "вотс" || prev == "ватс")
+        ) return true
+        return false
+    }
+
+    /**
+     * ВКонтакте: «вк», «вконтакте», «в контакте», «vk». Слово «контакте»
+     * считается мессенджером только после предлога — иначе это обычное слово.
+     */
+    private fun isVkWord(w: String, prev: String?): Boolean {
+        if (w.isEmpty()) return false
+        if (w == "вк" || w == "vk" || w == "вконтакте" || w == "vkontakte") return true
+        if (w.startsWith("вконтакт") || w.startsWith("vkontakt")) return true
+        if ((w == "контакте" || w == "контакт") && prev != null && (prev == "в" || prev == "во")) return true
+        return false
+    }
+
+    private fun isMessengerWord(word: String, prev: String? = null): Boolean =
+        isTelegramWord(word) || isWhatsappWord(normalize(word), prev) || isVkWord(normalize(word), prev)
+
+    /** Возвращает мессенджер, если он назван во фразе; иначе null. */
+    fun detectTarget(raw: String): Target? {
+        val ws = words(raw).map { normalize(it) }
+        for ((i, w) in ws.withIndex()) {
+            val prev = ws.getOrNull(i - 1)
+            when {
+                isTelegramWord(w) -> return Target.TELEGRAM
+                isWhatsappWord(w, prev) -> return Target.WHATSAPP
+                isVkWord(w, prev) -> return Target.VK
+            }
+        }
+        return null
+    }
 
     private val messengerPrepositions = setOf("в", "во", "по", "через", "на")
 
-    /** Убирает из фразы «в телеграм», «в телеге», «по тг» и т.п. */
+    /** Первые половинки разбитого распознаванием «вот сап». */
+    private val whatsappSplitPrefixes = setOf("вот", "ват", "вотс", "ватс")
+
+    /** Убирает из фразы «в телеграм», «в вотсап», «во вконтакте», «по тг». */
     fun stripTarget(raw: String): String {
         val parts = raw.split(Regex("\\s+")).filter { it.isNotEmpty() }
+        val norms = parts.map { words(it).map { w -> normalize(w) }.firstOrNull().orEmpty() }
         val drop = HashSet<Int>()
-        for ((i, w) in parts.withIndex()) {
-            if (isTelegramWord(w)) {
-                drop.add(i)
-                if (i > 0) {
-                    val prev = words(parts[i - 1]).firstOrNull()
-                    if (prev != null && messengerPrepositions.contains(prev)) drop.add(i - 1)
-                }
-            }
+        for ((i, w) in norms.withIndex()) {
+            val prev = norms.getOrNull(i - 1)?.takeIf { it.isNotEmpty() }
+            if (isMessengerWord(w, prev)) drop.add(i)
+        }
+        // «в вот сап»: второй кусок помечен — первый кусок и предлог перед ним тоже.
+        for (i in norms.indices) {
+            if (norms[i] in whatsappSplitPrefixes && drop.contains(i + 1)) drop.add(i)
+        }
+        // Предлог перед названием мессенджера: «в ватсап», «во вконтакте».
+        for (i in norms.indices) {
+            if (norms[i] in messengerPrepositions && drop.contains(i + 1)) drop.add(i)
         }
         if (drop.isEmpty()) return raw
         return parts.filterIndexed { i, _ -> !drop.contains(i) }.joinToString(" ")
