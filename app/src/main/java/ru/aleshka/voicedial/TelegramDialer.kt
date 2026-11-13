@@ -96,15 +96,30 @@ object TelegramDialer {
     fun isInstalled(context: Context): Boolean = installedClients(context).isNotEmpty()
 
     /**
-     * Клиент, который система назначила обработчиком ссылок tg:// по умолчанию.
-     * Именно он получает и наши звонки, если выбор не задан.
+     * Клиент, который система откроет по ссылке tg://, — то самое приложение
+     * «по умолчанию для ссылок». Спрашиваем у системы, а не угадываем:
+     * resolveActivity возвращает ровно то, что откроется по ссылке. Если
+     * возвращается экран выбора или ничего, обработчика по умолчанию нет.
      */
-    fun defaultPackage(context: Context): String? = try {
-        context.packageManager.queryIntentActivities(tgProbe(), 0)
-            .firstOrNull { it.isDefault }
-            ?.activityInfo?.packageName
-    } catch (e: Exception) {
-        null
+    fun defaultPackage(context: Context): String? {
+        val byResolve = try {
+            context.packageManager.resolveActivity(tgProbe(), PackageManager.MATCH_DEFAULT_ONLY)
+                ?.activityInfo?.packageName
+        } catch (e: Exception) {
+            null
+        }
+        // Экран выбора приложения обработчиком tg:// не является, поэтому в
+        // список клиентов не попадает: если resolveActivity вернул не клиента,
+        // значит, приложение по умолчанию не назначено и нужно спросить.
+        if (byResolve != null && linkHandlers(context).contains(byResolve)) return byResolve
+        // Запасной путь: система помечает обработчик по умолчанию флагом isDefault.
+        return try {
+            context.packageManager.queryIntentActivities(tgProbe(), 0)
+                .firstOrNull { it.isDefault }
+                ?.activityInfo?.packageName
+        } catch (e: Exception) {
+            null
+        }
     }
 
     /** Клиент, который владелец выбрал голосом, когда обработчика по умолчанию нет. */
@@ -140,30 +155,28 @@ object TelegramDialer {
     fun clientOptions(context: Context): List<String> = installedClients(context)
 
     /**
-     * Нужно ли спросить клиента голосом. Спрашиваем, только если система не
-     * назначила обработчик ссылок по умолчанию, владелец ещё не выбирал и
-     * установлено больше одного клиента.
+     * Нужно ли спросить клиента голосом. Не спрашиваем, если система уже
+     * назначила приложение для ссылок tg://, — звоним через него. Спрашиваем,
+     * только когда обработчика по умолчанию нет, владелец ещё не выбирал и
+     * клиентов установлено больше одного.
      */
     fun needsChoice(context: Context): Boolean {
-        val def = defaultPackage(context)
-        if (def != null && def != OFFICIAL) return false
+        if (defaultPackage(context) != null) return false
         if (savedClient(context) != null) return false
         return installedClients(context).size > 1
     }
 
     /**
-     * Клиент, через который звоним: обработчик ссылок по умолчанию, затем
-     * выбор владельца, затем единственный установленный клиент. null —
+     * Клиент, через который звоним: приложение для ссылок tg:// по умолчанию,
+     * затем выбор владельца, затем единственный установленный клиент. null —
      * клиента нет или выбор неоднозначен (тогда MainActivity спрашивает).
      */
     fun preferredPackage(context: Context): String? {
-        val def = defaultPackage(context)
-        if (def != null && def != OFFICIAL) return def
+        defaultPackage(context)?.let { return it }
         savedClient(context)?.let { return it }
         val clients = installedClients(context)
         if (clients.size == 1) return clients.first()
-        if (clients.size > 1) return null
-        return def
+        return null
     }
 
     /** Как клиент называется для голоса: «Telegram», «Nikogram». */

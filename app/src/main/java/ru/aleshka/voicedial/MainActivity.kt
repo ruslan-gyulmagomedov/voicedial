@@ -363,7 +363,10 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         val listing = clients.mapIndexed { i, pkg ->
             "${i + 1}. ${TelegramDialer.clientLabel(this, pkg)}"
         }.joinToString(", ")
-        speak("Установлено несколько клиентов Telegram: $listing. Скажите номер клиента.") {
+        speak(
+            "Установлено несколько клиентов Telegram: $listing, а приложение для ссылок не выбрано. " +
+                "Скажите номер клиента. Или назначьте клиент по умолчанию в настройках телефона — тогда спрашивать не буду."
+        ) {
             startListening()
         }
     }
