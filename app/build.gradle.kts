@@ -13,8 +13,8 @@ android {
         applicationId = "ru.gyulmagomedov.voicedial"
         minSdk = 33
         targetSdk = 35
-        versionCode = 9
-        versionName = "1.8"
+        versionCode = 10
+        versionName = "1.9"
     }
 
     // Подпись одна и та же для всех сборок: иначе Android не поставит новую

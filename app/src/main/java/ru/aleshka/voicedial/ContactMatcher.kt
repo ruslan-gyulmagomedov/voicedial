@@ -317,7 +317,7 @@ object ContactMatcher {
     }
 
     /** Куда звонить: обычный телефонный звонок или мессенджер. */
-    enum class Target { PHONE, TELEGRAM, WHATSAPP, VK }
+    enum class Target { PHONE, TELEGRAM, WHATSAPP, VK, MAX }
 
     private fun words(raw: String): List<String> =
         raw.lowercase().split(Regex("[^а-яёa-z0-9]+")).filter { it.isNotEmpty() }
@@ -376,8 +376,25 @@ object ContactMatcher {
         return false
     }
 
+    /** Предлоги, после которых «Макс» — название мессенджера, а не имя. */
+    private val maxPrepositions = setOf("в", "во", "через", "по")
+
+    /**
+     * MAX: «в Макс», «в Максе», «через Макс». «Макс» — ещё и частое имя
+     * (Максим), поэтому мессенджером слово считается только после предлога:
+     * «позвони Максу» — это контакт, «позвони Максу в Макс» — звонок в MAX.
+     * Формы перечислены точно, чтобы «Максим» никогда не считался клиентом.
+     */
+    private fun isMaxWord(w: String, prev: String?): Boolean {
+        if (w.isEmpty() || prev == null) return false
+        if (prev !in maxPrepositions) return false
+        return w == "макс" || w == "максе" || w == "максу" ||
+            w == "макса" || w == "максом" || w == "max"
+    }
+
     private fun isMessengerWord(word: String, prev: String? = null): Boolean =
-        isTelegramWord(word) || isWhatsappWord(normalize(word), prev) || isVkWord(normalize(word), prev)
+        isTelegramWord(word) || isWhatsappWord(normalize(word), prev) ||
+            isVkWord(normalize(word), prev) || isMaxWord(normalize(word), prev)
 
     /** Возвращает мессенджер, если он назван во фразе; иначе null. */
     fun detectTarget(raw: String): Target? {
@@ -388,6 +405,7 @@ object ContactMatcher {
                 isTelegramWord(w) -> return Target.TELEGRAM
                 isWhatsappWord(w, prev) -> return Target.WHATSAPP
                 isVkWord(w, prev) -> return Target.VK
+                isMaxWord(w, prev) -> return Target.MAX
             }
         }
         return null

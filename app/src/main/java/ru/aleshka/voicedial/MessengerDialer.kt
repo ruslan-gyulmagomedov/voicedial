@@ -12,7 +12,10 @@ import ru.aleshka.voicedial.ContactMatcher.Target
  * строкой «позвонить», которую мессенджер сам добавляет контакту в записную
  * книжку. Для ВКонтакте такой строки нет — там используется ссылка
  * https://vk.com/call?id=<числовой id>, а id берётся из контактов, которые
- * синхронизировал ВК.
+ * синхронизировал ВК. MAX (ru.oneme.app) снаружи звонок не запускает: там
+ * приложение открывается, а трубку в чате нажимает человек. Если MAX когда-
+ * нибудь начнёт класть строку «позвонить» в записную книжку, она сработает
+ * как у Telegram и WhatsApp.
  */
 object MessengerDialer {
 
@@ -30,7 +33,8 @@ object MessengerDialer {
             "org.telegram.messenger"
         ),
         Target.WHATSAPP to listOf("com.whatsapp", "com.whatsapp.w4b"),
-        Target.VK to listOf("com.vkontakte.android")
+        Target.VK to listOf("com.vkontakte.android"),
+        Target.MAX to listOf("ru.oneme.app")
     )
 
     /** Официальный клиент — только как предпочтение в списке строк. */
@@ -40,6 +44,7 @@ object MessengerDialer {
         Target.TELEGRAM -> "Telegram"
         Target.WHATSAPP -> "WhatsApp"
         Target.VK -> "ВКонтакте"
+        Target.MAX -> "MAX"
         else -> "телефон"
     }
 
@@ -48,6 +53,7 @@ object MessengerDialer {
         Target.TELEGRAM -> "в Telegram"
         Target.WHATSAPP -> "в WhatsApp"
         Target.VK -> "во ВКонтакте"
+        Target.MAX -> "в MAX"
         else -> ""
     }
 
@@ -55,6 +61,7 @@ object MessengerDialer {
         Target.TELEGRAM -> "telegram_client"
         Target.WHATSAPP -> "whatsapp_client"
         Target.VK -> "vk_client"
+        Target.MAX -> "max_client"
         else -> "phone_client"
     }
 
@@ -103,6 +110,12 @@ object MessengerDialer {
             }
             Target.VK ->
                 if (m.contains("vkontakte") && m.contains("call")) "com.vkontakte.android" else null
+            // MAX пока не кладёт в записную книжку строку «позвонить». Ветка
+            // на случай, если в будущих версиях такая строка появится.
+            Target.MAX -> when {
+                m.contains("call") && (m.contains("oneme") || m.contains("tamtam")) -> "ru.oneme.app"
+                else -> null
+            }
             else -> null
         }
     }
@@ -194,7 +207,7 @@ object MessengerDialer {
     fun forgetClients(context: Context) {
         try {
             val editor = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-            for (t in listOf(Target.TELEGRAM, Target.WHATSAPP, Target.VK)) editor.remove(key(t))
+            for (t in listOf(Target.TELEGRAM, Target.WHATSAPP, Target.VK, Target.MAX)) editor.remove(key(t))
             editor.apply()
         } catch (e: Exception) {
             // нечего сбрасывать
@@ -256,7 +269,20 @@ object MessengerDialer {
         Target.TELEGRAM -> "Звоню $name в ${clientLabel(context, target)}."
         Target.WHATSAPP -> "Звоню $name в WhatsApp."
         Target.VK -> "Звоню $name во ВКонтакте."
+        Target.MAX -> "Звоню $name в MAX."
         else -> "Звоню $name."
+    }
+
+    /**
+     * Открыть мессенджер на главном экране. Нужно там, где звонок снаружи
+     * невозможен: MAX не отдаёт наружу действие «позвонить», поэтому
+     * приложение открывает MAX и просит нажать трубку в чате.
+     */
+    fun openAppIntent(context: Context, target: Target): Intent? {
+        val pkg = preferredPackage(context, target) ?: return null
+        val intent = context.packageManager.getLaunchIntentForPackage(pkg) ?: return null
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        return intent
     }
 
     private fun packageOfMime(mime: String): String {
