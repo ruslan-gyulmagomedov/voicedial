@@ -325,8 +325,6 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                     speak("Звоню по номеру в ${MessengerDialer.clientLabel(this, target)}.") {
                         placeMessengerCall(ContactEntry(0L, "номер", number, 0), target)
                     }
-                ContactMatcher.Target.MAX ->
-                    speak("MAX не умеет звонить по номеру из другого приложения. Назовите имя контакта — открою MAX.")
                 else ->
                     // Ни WhatsApp, ни ВК не умеют звонить по номеру: нужен контакт.
                     speak("По номеру ${MessengerDialer.inPhrase(target)} позвонить нельзя. Скажите имя контакта.")
@@ -437,35 +435,8 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             return
         }
         val messenger = target
-        if (messenger == ContactMatcher.Target.MAX &&
-            MessengerDialer.callIntent(this, entry, messenger) == null
-        ) {
-            // MAX не отдаёт наружу звонок: снаружи можно только открыть
-            // приложение, трубку в чате нажимает человек. Не делаем вид, что
-            // звонок начался, — говорим как есть и открываем MAX.
-            speak(
-                "MAX не даёт начать звонок из другого приложения. Открываю MAX — " +
-                    "найдите ${entry.name} и нажмите трубку в чате."
-            ) {
-                openMessengerApp(messenger)
-            }
-            return
-        }
         speak(MessengerDialer.callPhrase(this, messenger, entry.name)) {
             placeMessengerCall(entry, messenger)
-        }
-    }
-
-    private fun openMessengerApp(messenger: ContactMatcher.Target) {
-        val intent = MessengerDialer.openAppIntent(this, messenger)
-        if (intent == null) {
-            speak("Не удалось открыть ${MessengerDialer.displayName(messenger)}.")
-            return
-        }
-        try {
-            startActivity(intent)
-        } catch (e: Exception) {
-            speak("Не удалось открыть ${MessengerDialer.displayName(messenger)}.")
         }
     }
 
@@ -477,8 +448,6 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                     "Не удалось позвонить в Telegram. Проверьте, что контакт есть в Telegram."
                 ContactMatcher.Target.WHATSAPP ->
                     "Не удалось позвонить в WhatsApp. Проверьте, что контакт есть в WhatsApp."
-                ContactMatcher.Target.MAX ->
-                    "MAX не даёт начать звонок из другого приложения. Откройте чат с контактом в MAX и нажмите трубку."
                 else ->
                     "Не удалось позвонить во ВКонтакте. Проверьте, что контакт синхронизирован с ВКонтакте."
             }
